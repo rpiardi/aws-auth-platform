@@ -7,7 +7,7 @@ include:
   - component: gitlab.com/components/opentofu/full-pipeline@4.5.0
     inputs:
       version: 4.5.0
-      opentofu_version: 1.11.6
+      opentofu_version: 1.11.5
       root_dir: terraform
       state_name: auth-platform-prd
       stage_build: plan

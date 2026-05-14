@@ -34,6 +34,8 @@ The repository uses the GitLab OpenTofu `full-pipeline` component.
 The component provides the standard OpenTofu jobs for formatting, validation,
 planning, and manual apply. The project sets:
 
+- component version: `4.5.0`
+- OpenTofu version: `1.11.5`
 - `root_dir`: `terraform`
 - `state_name`: `auth-platform-prd`
 - destructive cleanup jobs disabled with `destroy_rules` and `delete_state_rules`
