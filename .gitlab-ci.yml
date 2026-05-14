@@ -1,0 +1,21 @@
+variables:
+  AWS_DEFAULT_REGION: "us-east-1"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+include:
+  - component: gitlab.com/components/opentofu/full-pipeline@4.5.0
+    inputs:
+      version: 4.5.0
+      opentofu_version: 1.11.6
+      root_dir: terraform
+      state_name: auth-platform-prd
+      stage_build: plan
+      stage_deploy: apply
+      fmt_allow_failure: false
+      use_lockfile_for_cache_key: true
+      lockfile: readonly
+      destroy_rules:
+        - when: never
+      delete_state_rules:
+        - when: never

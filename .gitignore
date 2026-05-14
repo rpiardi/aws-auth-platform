@@ -1,0 +1,5 @@
+.terraform/
+*.tfplan
+*.zip
+__pycache__/
+*.pyc
