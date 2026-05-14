@@ -12,6 +12,8 @@ include:
       state_name: auth-platform-prd
       stage_build: plan
       stage_deploy: apply
+      plan_extra_artifacts:
+        - terraform/lambda_wrapper.zip
       fmt_allow_failure: false
       use_lockfile_for_cache_key: true
       lockfile: readonly
