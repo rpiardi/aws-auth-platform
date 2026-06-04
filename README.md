@@ -3,6 +3,9 @@
 AWS-based M2M authentication platform using Amazon Cognito, API Gateway REST API,
 AWS Lambda, and Terraform/OpenTofu.
 
+Detailed implementation notes, CI behavior, AWS permissions, and troubleshooting
+are documented in [docs/implementation.md](docs/implementation.md).
+
 The public token endpoint is:
 
 ```text
@@ -38,6 +41,7 @@ planning, and manual apply. The project sets:
 - OpenTofu version: `1.11.5`
 - `root_dir`: `terraform`
 - `state_name`: `auth-platform-prd`
+- `plan_extra_artifacts`: `terraform/lambda_wrapper.zip`
 - destructive cleanup jobs disabled with `destroy_rules` and `delete_state_rules`
 
 Required GitLab CI variables:
@@ -46,6 +50,12 @@ Required GitLab CI variables:
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_DEFAULT_REGION=us-east-1
+```
+
+If temporary credentials are used, also configure:
+
+```text
+AWS_SESSION_TOKEN
 ```
 
 ## Retrieve Client Secret
