@@ -2,10 +2,6 @@ name: OpenTofu CI
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/opentofu-*.yml"
-      - "src/**"
-      - "terraform/**"
 
 permissions:
   contents: read
