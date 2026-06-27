@@ -1,5 +1,29 @@
+# Terraform/OpenTofu
 .terraform/
+*.tfstate
+*.tfstate.*
 *.tfplan
+*.tfvars
+*.tfvars.json
+.terraform.lock.hcl.backup
+crash.log
+crash.*.log
+
+# Build artifacts
 *.zip
+
+# Python
 __pycache__/
 *.pyc
+
+# Credentials and local environment
+.env
+.env.*
+credentials
+*.pem
+*.key
+
+# Editors and operating systems
+.DS_Store
+.vscode/
+.idea/
