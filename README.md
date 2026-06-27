@@ -30,33 +30,36 @@ terraform plan
 terraform apply
 ```
 
-## GitLab CI
+## GitHub Actions
 
-The repository uses the GitLab OpenTofu `full-pipeline` component.
+GitHub is the primary repository and GitHub Actions is the active CI/CD system.
 
-The component provides the standard OpenTofu jobs for formatting, validation,
-planning, and manual apply. The project sets:
-
-- component version: `4.5.0`
-- OpenTofu version: `1.11.5`
-- `root_dir`: `terraform`
-- `state_name`: `auth-platform-prd`
-- `plan_extra_artifacts`: `terraform/lambda_wrapper.zip`
-- destructive cleanup jobs disabled with `destroy_rules` and `delete_state_rules`
-
-Required GitLab CI variables:
+Pull requests run:
 
 ```text
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-AWS_DEFAULT_REGION=us-east-1
+OpenTofu Format
+OpenTofu Validate
 ```
 
-If temporary credentials are used, also configure:
+Both checks are required by the protected `main` branch.
+
+Deployments use the manual `OpenTofu Deployment` workflow. Select `plan` to
+preview changes or `apply` to create and apply a saved plan in the same job.
+The workflow uses OpenTofu `1.11.5`, the `prd` environment, and the existing S3
+state backend.
+
+AWS authentication uses GitHub OIDC with:
 
 ```text
-AWS_SESSION_TOKEN
+AWS_ROLE_ARN=arn:aws:iam::209479281611:role/AuthPlatformGitHubDeployer
 ```
+
+`AWS_ROLE_ARN` is an environment variable in `prd`. No long-lived AWS access
+keys are stored in GitHub.
+
+The former GitLab pipeline is archived at
+[`docs/archive/gitlab-ci.yml`](docs/archive/gitlab-ci.yml) and must not be used
+for deployments.
 
 ## Retrieve Client Secret
 
