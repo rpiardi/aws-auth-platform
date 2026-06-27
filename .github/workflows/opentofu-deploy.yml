@@ -1,0 +1,61 @@
+name: OpenTofu Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to execute against the prd state
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: auth-platform-prd-state
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  deploy:
+    name: OpenTofu ${{ inputs.operation }}
+    runs-on: ubuntu-latest
+    environment: prd
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v2.0.1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-OpenTofu
+          aws-region: us-east-1
+
+      - name: Initialize backend
+        run: tofu init -input=false -lockfile=readonly
+
+      - name: Create plan
+        run: tofu plan -input=false -no-color -out=tfplan
+
+      - name: Apply plan
+        if: inputs.operation == 'apply'
+        run: tofu apply -input=false -no-color -auto-approve tfplan

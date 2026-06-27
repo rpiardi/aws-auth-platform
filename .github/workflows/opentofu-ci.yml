@@ -1,0 +1,56 @@
+name: OpenTofu CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/opentofu-*.yml"
+      - "src/**"
+      - "terraform/**"
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  fmt:
+    name: OpenTofu Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v2.0.1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+
+      - name: Check formatting
+        run: tofu fmt -check -recursive
+
+  validate:
+    name: OpenTofu Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v2.0.1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+
+      - name: Initialize without backend
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate configuration
+        run: tofu validate
