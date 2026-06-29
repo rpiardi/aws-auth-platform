@@ -75,6 +75,65 @@ aws cognito-idp describe-user-pool-client \
   --output text
 ```
 
+## Partner Identity (Approach A)
+
+A Pre Token Generation V3 trigger resolves the calling M2M client to a partner
+identity at access-token issuance and injects it as signed access-token claims
+(`partner_id`, `tenant`). The business API consumes these claims without any
+lookup. The trigger reads identity from the `auth-partners` DynamoDB table.
+
+### Provision a partner
+
+The table is keyed by `client_id`. Each record must carry a non-empty
+`partner_id` and `tenant`:
+
+```json
+{ "client_id": "<app_client_id>", "partner_id": "PARTNER-001", "tenant": "acme" }
+```
+
+Create or update a record with AWS CLI (no redeploy needed — changes propagate
+within the trigger cache TTL, 300s by default):
+
+```bash
+aws dynamodb put-item \
+  --region us-east-1 \
+  --table-name auth-partners \
+  --item '{
+    "client_id":  {"S": "<app_client_id>"},
+    "partner_id": {"S": "PARTNER-001"},
+    "tenant":     {"S": "acme"}
+  }'
+```
+
+Inspect a record:
+
+```bash
+aws dynamodb get-item \
+  --region us-east-1 \
+  --table-name auth-partners \
+  --key '{"client_id": {"S": "<app_client_id>"}}'
+```
+
+### Fail-closed behavior
+
+A client with no record, or a record missing `partner_id`/`tenant`, is rejected
+by the trigger and **no token is issued** (`/oauth/token` returns a generic
+error). Provision every M2M client before it requests a token.
+
+### Requirements
+
+- The User Pool must be on the **Essentials** (or Plus) tier — the V3_0 event
+  used for M2M access-token customization does not fire on the Lite tier, and
+  M2M V3 customization is billed separately from MAU.
+- The deploy role `AuthPlatformGitHubDeployer` needs permissions to manage the
+  new resources: `dynamodb:*` on the `auth-partners` table (CreateTable,
+  DescribeTable, DescribeContinuousBackups, UpdateContinuousBackups,
+  TagResource, ListTagsOfResource, UpdateTable, DeleteTable) and IAM role
+  management for `auth-platform-lambda-pretoken-role` (CreateRole, GetRole,
+  PutRolePolicy, GetRolePolicy, ListRolePolicies, DeleteRolePolicy, PassRole,
+  TagRole, DeleteRole), plus `lambda:CreateFunction`/`AddPermission` and
+  `cognito-idp:UpdateUserPool`.
+
 ## Token Request Format
 
 Use `application/x-www-form-urlencoded`:
