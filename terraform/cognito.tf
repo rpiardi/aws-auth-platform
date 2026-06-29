@@ -4,6 +4,17 @@ locals {
 
 resource "aws_cognito_user_pool" "m2m" {
   name = "${var.project_name}-m2m-user-pool"
+
+  # Essentials tier is required for M2M access token customization (V3_0).
+  # The V3_0 event does not fire on the Lite tier.
+  user_pool_tier = "ESSENTIALS"
+
+  lambda_config {
+    pre_token_generation_config {
+      lambda_arn     = aws_lambda_function.pretoken.arn
+      lambda_version = "V3_0"
+    }
+  }
 }
 
 resource "aws_cognito_resource_server" "m2m" {

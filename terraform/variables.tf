@@ -63,3 +63,15 @@ variable "custom_domain_base_path" {
   type        = string
   default     = "oauth"
 }
+
+variable "auth_partners_table_name" {
+  description = "DynamoDB table that maps client_id to {partner_id, tenant} for the Pre Token Generation trigger."
+  type        = string
+  default     = "auth-partners"
+}
+
+variable "partners_cache_ttl_seconds" {
+  description = "In-memory cache TTL (seconds) for partner resolution inside the Pre Token Generation Lambda."
+  type        = number
+  default     = 300
+}
