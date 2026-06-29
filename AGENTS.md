@@ -29,8 +29,11 @@ API Gateway Auth
 Lambda Wrapper
    ↓
 Cognito /oauth2/token
+   ↓ Pre Token Generation V3 trigger
+   ↓    resolves client_id → {partner_id, tenant} from auth-partners
+   ↓    injects partner_id + tenant as access-token claims (fail-closed)
    ↓
-JWT Access Token
+JWT Access Token (signed, carrying partner_id + tenant)
 ```
 
 The Lambda Wrapper is a pure proxy to Cognito's `/oauth2/token` endpoint.
@@ -98,11 +101,14 @@ auth-platform/
 │   ├── cognito.tf
 │   ├── lambda.tf
 │   ├── apigateway.tf
+│   ├── dynamodb.tf
 │   ├── iam.tf
 │   └── logs.tf
 │
 └── src/
-    └── wrapper/
+    ├── wrapper/
+    │   └── lambda_function.py
+    └── pretoken/
         └── lambda_function.py
 ```
 
@@ -543,7 +549,8 @@ Resource = "*"
 
 unless strictly necessary.
 
-The Lambda execution role should contain only CloudWatch logging permissions.
+The Lambda Wrapper execution role should contain only CloudWatch logging
+permissions.
 
 Do not add permissions for:
 
@@ -553,6 +560,24 @@ Do not add permissions for:
 - Cognito Admin APIs
 
 unless explicitly requested.
+
+### Deliberate exception: Pre Token Generation trigger
+
+The Pre Token Generation Lambda (`auth-platform-lambda-pretoken`) is a
+documented exception to the "no DynamoDB" rule above. It resolves partner
+identity (`client_id -> {partner_id, tenant}`) at access-token issuance time and
+therefore needs `dynamodb:GetItem` on the `auth-partners` table.
+
+This is intentional and scoped:
+
+- the only DynamoDB action granted is `dynamodb:GetItem`;
+- the only resource is the `auth-partners` table;
+- partner identity is part of the auth domain, so it stays in this repository;
+- the trigger never reads or writes business data.
+
+The trigger fails closed: an unknown client or an invalid partner record raises,
+so Cognito does not issue a token. It never logs tokens, secrets, the
+`Authorization` header, or the contents of `auth-partners`.
 
 ---
 
