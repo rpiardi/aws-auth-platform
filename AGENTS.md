@@ -1,633 +1,364 @@
 # AGENTS.md
 
-## Project
+## Project Overview
 
 This repository contains the infrastructure and Lambda code for the `auth-platform` project.
 
-The goal is to provide an AWS-based M2M authentication platform using:
+The goal is to provide an AWS-based Machine-to-Machine (M2M) authentication platform using:
 
-- Amazon Cognito
-- API Gateway REST API
-- AWS Lambda Wrapper
-- Terraform
+- Amazon Cognito (User Pool with Essentials tier and Pre Token Generation V3_0 trigger)
+- Amazon API Gateway (REST API with Regional endpoint and custom domain base path mapping)
+- AWS Lambda (Python 3.12: proxy wrapper and pretoken trigger)
+- Amazon DynamoDB (on-demand partner identity lookup table)
+- OpenTofu / Terraform (IaC with remote S3 backend and native state locking)
+- GitHub Actions (CI/CD using AWS OIDC authentication)
 
-The initial scope is authentication only.
-
-Do not implement business APIs in this repository.
+**Strict Scope Boundary**: This repository implements authentication only. Do not implement business APIs, internal microservice proxies, or business authorizers in this repository.
 
 ---
 
 # Architecture Summary
 
-Request flow:
+Request and enrichment flow:
 
 ```text
-Consumer
-   ↓ client_id + client_secret + scope
-API Gateway Auth
-   ↓
-Lambda Wrapper
-   ↓
+Consumer (M2M Client)
+   ↓ POST client_id + client_secret + scope (application/x-www-form-urlencoded)
+API Gateway REST API (Regional)
+   ↓ [POST /token mapped to custom domain https://minha-api.freeddns.org/oauth/token]
+Lambda Proxy Wrapper (auth-platform-lambda-wrapper)
+   ↓ [forwards body to Cognito /oauth2/token, timeout: 4s]
 Cognito /oauth2/token
-   ↓ Pre Token Generation V3 trigger
-   ↓    resolves client_id → {partner_id, tenant} from auth-partners
+   ↓ Pre Token Generation V3_0 trigger (auth-platform-lambda-pretoken)
+   ↓    resolves client_id → {partner_id, tenant} from DynamoDB (auth-partners)
    ↓    injects partner_id + tenant as access-token claims (fail-closed)
    ↓
-JWT Access Token (signed, carrying partner_id + tenant)
+JWT Access Token (signed RS256, carrying partner_id + tenant claims)
+   ↓
+Returned to Consumer via Lambda Wrapper & API Gateway
 ```
 
-The Lambda Wrapper is a pure proxy to Cognito's `/oauth2/token` endpoint.
+### Component Roles & Boundaries
 
-It must not:
+1. **Lambda Wrapper (`auth-platform-lambda-wrapper`)**:
+   - Pure, transparent proxy to Cognito's `/oauth2/token` endpoint.
+   - Preserves the OAuth2 contract.
+   - Must NOT: validate credentials, translate scopes, call Cognito Admin APIs, use Secrets Manager, or alter token responses.
 
-- validate credentials;
-- translate scopes;
-- use Secrets Manager;
-- use Cognito Admin APIs;
-- modify the OAuth2 contract.
+2. **Pre Token Generation Trigger (`auth-platform-lambda-pretoken`)**:
+   - Executes inside Cognito token issuance flow (`TokenGeneration_ClientCredentials`).
+   - Resolves `client_id` to `{partner_id, tenant}` via DynamoDB `auth-partners`.
+   - Uses an in-memory cache for positive (300s) and negative (30s) lookups to optimize warm executions.
+   - Injects claims into `accessTokenGeneration.claimsToAddOrOverride`.
+   - **Fails closed**: If the client is unknown, disabled, or an error occurs, it raises an exception so Cognito aborts token issuance.
 
 ---
 
-# AWS Region
+# Technology Stack & Specifications
 
-Use:
-
-```text
-us-east-1
-```
-
----
-
-# Terraform Backend
-
-Use the existing S3 backend:
-
-```text
-bucket = rogerio-iac-prod-us-east-1
-key    = rogerio.piardi/terraform/auth-platform/prd.tfstate
-region = us-east-1
-```
-
-Use:
-
-```hcl
-use_lockfile = true
-```
-
-Do not create DynamoDB for Terraform locking.
+| Component | Technology | Specification / Configuration |
+|---|---|---|
+| **Cloud Provider** | AWS | Region: `us-east-1` |
+| **IaC Engine** | OpenTofu | Version: `1.11.5` (strict CI requirement) |
+| **Providers** | OpenTofu Registry | `hashicorp/aws` (~> 5.0), `hashicorp/archive` (~> 2.7) |
+| **State Backend** | Amazon S3 | Bucket: `rogerio-iac-prod-us-east-1`<br>Key: `rogerio.piardi/terraform/auth-platform/prd.tfstate`<br>Locking: Native S3 (`use_lockfile = true`, NO DynamoDB lock table) |
+| **Identity Provider** | Amazon Cognito | User Pool: `auth-platform-m2m-user-pool`<br>Tier: `ESSENTIALS` (required for V3_0 machine identities)<br>Trigger: Pre Token Generation `V3_0`<br>Resource Server: `m2m-prd` (scopes: `read`, `write`)<br>App Client: `auth-platform-m2m-client` (`client_credentials`, 30 min TTL)<br>Domain Prefix: `personal-rvpi-auth-platform` |
+| **API Gateway** | Amazon API Gateway | Type: REST API (`auth-platform-api`), Regional<br>Stage: `prd`<br>Endpoint: `POST /token` with Lambda Proxy Integration<br>Custom Domain: `minha-api.freeddns.org`<br>Base Path Mapping: `oauth` (Produces: `/oauth/token`) |
+| **Compute (Functions)** | AWS Lambda | Runtime: `python3.12`<br>Architecture: x86_64<br>Memory: 256 MB, Timeout: 5s<br>Packaging: zip via `archive_file` |
+| **Data Store** | Amazon DynamoDB | Table: `auth-partners`<br>Billing: `PAY_PER_REQUEST` (on-demand)<br>Primary Key: `client_id` (String)<br>PITR: Enabled |
+| **Observability** | Amazon CloudWatch | Retention: 14 days<br>Groups: `/aws/lambda/auth-platform-lambda-wrapper`, `/aws/lambda/auth-platform-lambda-pretoken`, `/aws/apigateway/auth-platform-access-logs`<br>API GW Access Logs: Structured JSON format |
+| **CI/CD** | GitHub Actions | Workflows: `opentofu-ci.yml`, `opentofu-deploy.yml`<br>Auth: AWS OIDC via Role `arn:aws:iam::209479281611:role/AuthPlatformGitHubDeployer`<br>Environment: `prd` |
 
 ---
 
 # Repository Structure
 
-Expected structure:
-
 ```text
 auth-platform/
-├── AGENTS.md
-├── README.md
+├── AGENTS.md                          # Governance, coding standards & rules for agents
+├── README.md                          # Operational overview & quickstart
+├── docs/
+│   ├── archive/
+│   │   └── gitlab-ci.yml              # Archived historical reference (DO NOT RESTORE)
+│   ├── implementation.md              # Detailed architectural notes & operational record
+│   ├── decisoes-abordagens-m2m.md     # Architecture decisions for partner enrichment
+│   ├── spec-abordagens-A-C-D.md       # Comparative analysis of M2M architectures
+│   ├── spec-layer-enriquecimento-parceiro.md
+│   └── spec-proxy-por-verbo.md
+│
 ├── .github/
 │   └── workflows/
-│       ├── opentofu-ci.yml
-│       ├── opentofu-deploy.yml
-│       └── test-aws-oidc.yml
+│       ├── opentofu-ci.yml            # PR check: tofu fmt + tofu validate
+│       ├── opentofu-deploy.yml        # Manual dispatch: tofu plan / tofu apply (prd)
+│       └── test-aws-oidc.yml          # GitHub OIDC connectivity test
 │
 ├── terraform/
-│   ├── backend.tf
-│   ├── versions.tf
-│   ├── providers.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── cognito.tf
-│   ├── lambda.tf
-│   ├── apigateway.tf
-│   ├── dynamodb.tf
-│   ├── iam.tf
-│   └── logs.tf
+│   ├── .terraform.lock.hcl            # OpenTofu provider lockfile (registry.opentofu.org)
+│   ├── backend.tf                     # S3 backend with use_lockfile = true
+│   ├── versions.tf                    # OpenTofu & provider version constraints
+│   ├── providers.tf                   # AWS provider with default tags
+│   ├── variables.tf                   # Input variables with sensible defaults
+│   ├── outputs.tf                     # Safe public outputs (NO secrets)
+│   ├── cognito.tf                     # User Pool Essentials, Resource Server, Client, Domain
+│   ├── dynamodb.tf                    # auth-partners DynamoDB table
+│   ├── lambda.tf                      # Lambda wrapper, pretoken trigger & permissions
+│   ├── apigateway.tf                  # REST API, /token resource, stage & base path mapping
+│   ├── iam.tf                         # Least-privilege Lambda execution roles and policies
+│   └── logs.tf                        # CloudWatch log groups (14-day retention)
 │
 └── src/
     ├── wrapper/
-    │   └── lambda_function.py
+    │   └── lambda_function.py         # HTTP proxy Lambda forwarding to Cognito /oauth2/token
     └── pretoken/
-        └── lambda_function.py
-```
-
-Do not create Terraform submodules unless explicitly requested.
-
-Keep all Terraform files inside the `terraform/` directory.
-
----
-
-# Naming Convention
-
-Use concise resource names based on:
-
-```text
-<project>-<resource>
-```
-
-Examples:
-
-```text
-auth-platform-api
-auth-platform-lambda-wrapper
-auth-platform-lambda-wrapper-role
-auth-platform-m2m-user-pool
-```
-
-Do not include the `aws-` prefix in resource names.
-
-Do not include the `prd` stage in resource names unless required by AWS uniqueness constraints.
-
----
-
-# Tags
-
-Use only:
-
-```text
-Project = auth-platform
+        └── lambda_function.py         # Pre Token Generation V3_0 claim enrichment trigger
 ```
 
 ---
 
-# Terraform Guidelines
+# Naming Conventions & Tagging
 
-Use Terraform files by responsibility:
+### Resource Naming
+- Use lowercase kebab-case prefixed with the project name: `<project>-<resource>`.
+- Examples:
+  - `auth-platform-api`
+  - `auth-platform-lambda-wrapper`
+  - `auth-platform-lambda-wrapper-role`
+  - `auth-platform-lambda-pretoken`
+  - `auth-platform-lambda-pretoken-role`
+  - `auth-platform-m2m-user-pool`
+  - `auth-platform-m2m-client`
+- **Do not** include the `aws-` prefix in resource names.
+- **Do not** include the `prd` stage suffix in resource names unless required by AWS global/regional uniqueness constraints (e.g., `m2m-prd` resource server identifier).
 
-- `backend.tf`
-- `versions.tf`
-- `providers.tf`
-- `variables.tf`
-- `outputs.tf`
-- `cognito.tf`
-- `lambda.tf`
-- `apigateway.tf`
-- `iam.tf`
-- `logs.tf`
-
-Prefer variables with defaults for configurable values.
-
-Suggested variables:
-
-- AWS region
-- project name
-- stage name
-- Cognito domain prefix
-- resource server identifier
-- access token TTL
-- Lambda timeout
-- Lambda memory
-- log retention days
-- custom domain name
-- custom domain base path
-
-Do not over-parameterize structural decisions such as:
-
-- REST API usage
-- Regional endpoint type
-- OAuth flow `client_credentials`
-- scopes `read` and `write`
-- `application/x-www-form-urlencoded` contract
-- Lambda Proxy Integration
+### Resource Tagging
+- Tagging must remain minimal and uniform:
+  ```hcl
+  tags = {
+    Project = "auth-platform"
+  }
+  ```
+- Handled globally via `default_tags` in `terraform/providers.tf`.
 
 ---
 
-# GitHub Actions
+# Coding Standards & Patterns
 
-GitHub is the primary repository and GitHub Actions is the only active CI/CD
-system.
+## Python Standards (Lambdas)
 
-Workflow files:
+1. **Runtime & Dependencies**:
+   - Runtime: `python3.12`.
+   - Use Python Standard Library wherever possible.
+   - For `wrapper`: Standard library only (`urllib.request`, `urllib.error`, `json`, `os`, `base64`). Zero external dependencies.
+   - For `pretoken`: Standard library + `boto3` (available in AWS Lambda runtime). Zero third-party pip dependencies.
+   - Do NOT introduce `pip`, `poetry`, virtualenvs, Docker packaging, or third-party wheels without explicit approval.
 
-```text
-.github/workflows/opentofu-ci.yml
-.github/workflows/opentofu-deploy.yml
-.github/workflows/test-aws-oidc.yml
-```
+2. **Error Handling & HTTP Contract**:
+   - `wrapper`:
+     - Accepts only `POST` → returns `405` with `{"error": "method_not_allowed"}` for others.
+     - Rejects empty bodies → returns `400` with `{"error": "invalid_request", "error_description": "empty body"}`.
+     - Decodes base64-encoded bodies from API Gateway if `event.get("isBase64Encoded")` is true.
+     - Forwards raw HTTP status and headers from Cognito.
+     - Handles timeouts and connection errors → returns `502` with `{"error": "bad_gateway", "error_description": "cognito communication failure"}`.
+     - Strict timeout discipline: HTTP request timeout is `4` seconds, strictly shorter than the Lambda `5` seconds timeout.
+   - `pretoken`:
+     - Validates `triggerSource == "TokenGeneration_ClientCredentials"`.
+     - **Fail-closed**: Raises an exception if client is not found in DynamoDB or trigger source is invalid. Raising an exception prevents Cognito from issuing the token.
+     - Emits structured JSON events for resolution or rejection (`pretoken_resolved`, `pretoken_rejected`).
 
-The workflows must:
+3. **In-Memory Caching Pattern (`src/pretoken/lambda_function.py`)**:
+   - Cache lookup results in a module-scoped dict to avoid DynamoDB round-trips on warm invocations:
+     - Positive cache TTL: configurable via `PARTNERS_CACHE_TTL` (default `300` seconds).
+     - Negative cache TTL: short duration (`30` seconds) to protect against hammering DynamoDB for invalid clients while allowing prompt recovery after provisioning.
 
-- use OpenTofu `1.11.5`;
-- run `tofu fmt -check -recursive` and `tofu validate` on every pull request;
-- initialize validation with `-backend=false` and `-lockfile=readonly`;
-- keep `plan` and `apply` manually triggered with `workflow_dispatch`;
-- run deployment only from the protected `main` branch;
-- use the GitHub environment `prd`;
-- authenticate to AWS through OIDC using `vars.AWS_ROLE_ARN`;
-- serialize state operations with the `auth-platform-prd-state` concurrency group;
-- generate and apply the saved plan in the same job;
-- never expose the saved plan as a public artifact.
+4. **Logging & Zero-Secret-Leakage Policy**:
+   - Use structured JSON logging.
+   - **ABSOLUTE RULE**: Never log:
+     - Client secrets
+     - Access tokens or refresh tokens
+     - The `Authorization` header
+     - Raw HTTP request bodies
+     - Full DynamoDB partner record dumps
+   - Only log operational metadata: event name, request IDs, partner ID, tenant, and HTTP statuses.
 
-AWS role:
+5. **Code Style & Syntax Verification**:
+   - Follow PEP 8 formatting.
+   - Code must compile cleanly:
+     ```bash
+     python3 -m py_compile src/wrapper/lambda_function.py src/pretoken/lambda_function.py
+     ```
 
-```text
-arn:aws:iam::209479281611:role/AuthPlatformGitHubDeployer
-```
+## Terraform / OpenTofu Standards
 
-Do not store long-lived AWS access keys in GitHub.
+1. **Tooling & Versioning**:
+   - Engine: OpenTofu `1.11.5`.
+   - Providers:
+     - `hashicorp/aws ~> 5.0`
+     - `hashicorp/archive ~> 2.7`
+   - Provider Lockfile (`.terraform.lock.hcl`):
+     - Must be locked to `registry.opentofu.org`.
+     - **Never** regenerate the lockfile using standard `terraform` CLI, as it rewrites registry sources to `registry.terraform.io` and breaks CI.
+     - Only update lockfile with `tofu init -upgrade`.
 
-The archived GitLab pipeline is historical reference only:
+2. **File Organization & Responsibility**:
+   - Keep all infrastructure code inside `terraform/`.
+   - Do NOT create Terraform submodules unless explicitly directed. Keep flat, declarative, and easily auditable.
+   - Separation of files:
+     - `backend.tf`: S3 backend configuration only.
+     - `versions.tf`: OpenTofu and provider version constraints.
+     - `providers.tf`: Provider setup and `default_tags`.
+     - `variables.tf`: Input variable definitions with types and descriptions.
+     - `outputs.tf`: Output declarations.
+     - `cognito.tf`: Cognito User Pool, Client, Resource Server, and Domain.
+     - `dynamodb.tf`: DynamoDB tables.
+     - `lambda.tf`: Lambda functions, zip archives, and invoke permissions.
+     - `apigateway.tf`: REST API, resources, methods, integrations, stages, base path mapping.
+     - `iam.tf`: Roles and scoped policies for Lambda functions.
+     - `logs.tf`: CloudWatch log groups and retention settings.
 
-```text
-docs/archive/gitlab-ci.yml
-```
+3. **Variables & Parameters**:
+   - Provide explicit types and sensible defaults for configurable parameters.
+   - Do not over-parameterize immutable architectural choices (such as Regional REST API, client_credentials flow, standard scopes, or form-urlencoded encoding).
 
-Do not restore `.gitlab-ci.yml` or run deployment pipelines from GitLab.
-
-Do not create complex CI/CD automation initially.
-
-Do not introduce:
-
-- custom Docker images;
-- Makefiles;
-- multi-environment promotion flows;
-- automatic apply on every commit;
-- business API deployment steps.
-
-Keep the workflows minimal and operational.
-
----
-
-# Terraform Outputs
-
-Expose the following Terraform outputs:
-
-```text
-user_pool_id
-user_pool_arn
-app_client_id
-cognito_token_url
-auth_api_id
-auth_api_invoke_url
-auth_api_custom_domain_url
-```
-
-Do not expose the Cognito App Client secret in Terraform outputs.
-
----
-
-# Cognito Requirements
-
-Create:
-
-- Cognito User Pool
-- Cognito Resource Server
-- Cognito App Client
-- Cognito AWS managed domain
-
-User Pool name:
-
-```text
-auth-platform-m2m-user-pool
-```
-
-Resource Server identifier:
-
-```text
-m2m-prd
-```
-
-Scopes:
-
-```text
-read
-write
-```
-
-Expected scopes:
-
-```text
-m2m-prd/read
-m2m-prd/write
-```
-
-OAuth flow:
-
-```text
-client_credentials
-```
-
-Access token TTL:
-
-```text
-30 minutes
-```
-
-Cognito domain prefix:
-
-```text
-personal-rvpi-auth-platform
-```
-
-Do not implement scope translation.
+4. **Outputs**:
+   - Expose only non-sensitive operational identifiers:
+     - `user_pool_id`
+     - `user_pool_arn`
+     - `app_client_id`
+     - `cognito_token_url`
+     - `auth_api_id`
+     - `auth_api_invoke_url`
+     - `auth_api_custom_domain_url`
+   - **Never** expose the Cognito App Client Secret in Terraform outputs.
 
 ---
 
-# Client Secret Handling
+# Security & IAM Guidelines
 
-Do not output the Cognito App Client secret.
+1. **Principle of Least Privilege**:
+   - Do not use wildcard actions (`*`) or wildcard resources (`*`) where a specific action or ARN can be specified.
+   - `auth-platform-lambda-wrapper-role`:
+     - Granted ONLY CloudWatch log creation permissions (`logs:CreateLogStream`, `logs:PutLogEvents`).
+     - NO permissions for DynamoDB, Secrets Manager, S3, or Cognito Admin APIs.
+   - `auth-platform-lambda-pretoken-role`:
+     - Granted CloudWatch log creation permissions.
+     - **Deliberate Scoped Exception**: Granted `dynamodb:GetItem` exclusively on `arn:aws:dynamodb:*:*:table/auth-partners`. No PutItem, UpdateItem, Scan, or DeleteItem permissions.
+   - API Gateway execution role: AWS account already has `arn:aws:iam::209479281611:role/api-gateway-cloudwatch-role`. Do not declare `aws_api_gateway_account` in Terraform.
 
-Do not use Secrets Manager initially.
-
-The client secret remains managed by Cognito and may be retrieved manually through AWS Console or AWS CLI.
-
----
-
-# Lambda Wrapper Requirements
-
-Lambda name:
-
-```text
-auth-platform-lambda-wrapper
-```
-
-Runtime:
-
-```text
-Python
-```
-
-Package type:
-
-```text
-zip
-```
-
-Packaging strategy:
-
-```text
-archive_file
-```
-
-Timeout:
-
-```text
-5 seconds
-```
-
-Memory:
-
-```text
-256 MB
-```
-
-The Lambda Wrapper must:
-
-- receive `application/x-www-form-urlencoded` requests;
-- forward the request body to Cognito `/oauth2/token`;
-- preserve the OAuth2 contract;
-- return Cognito's response.
-
-Implementation guidelines:
-
-- use Python standard library;
-- use `urllib.request` for HTTP calls;
-- read Cognito URL from `COGNITO_TOKEN_URL` environment variable;
-- use HTTP timeout shorter than Lambda timeout;
-- suggested HTTP timeout: 4 seconds.
-
-Suggested internal flow:
-
-```text
-API Gateway event
-   ↓
-validate HTTP method
-   ↓
-read request body
-   ↓
-decode base64 body if needed
-   ↓
-forward request to Cognito
-   ↓
-return Cognito response
-```
-
-The Lambda should:
-
-- accept only `POST`;
-- return `405` for unsupported methods;
-- return `400` for empty body;
-- return `502` for Cognito communication failure or timeout.
-
-Never log:
-
-- client secrets;
-- access tokens;
-- full request bodies;
-- sensitive headers.
-
-Do not add external dependencies unless explicitly requested.
+2. **Credentials & Secrets**:
+   - Do not store long-lived AWS credentials in GitHub repository secrets.
+   - CI/CD authenticates to AWS exclusively through GitHub OIDC using `vars.AWS_ROLE_ARN`.
+   - Cognito client secret is managed inside Cognito; retrieve it manually via AWS CLI (see Runbook below).
 
 ---
 
-# API Gateway Requirements
+# CI/CD & GitHub Actions
 
-Create an API Gateway REST API.
+GitHub is the single source of truth and GitHub Actions is the only active CI/CD platform.
 
-API name:
+Workflows:
+- `.github/workflows/opentofu-ci.yml`:
+  - Triggers on pull requests.
+  - Runs `tofu fmt -check -recursive`.
+  - Runs `tofu init -backend=false -input=false -lockfile=readonly`.
+  - Runs `tofu validate`.
+  - Both checks are strictly required by the protected `main` branch.
+- `.github/workflows/opentofu-deploy.yml`:
+  - Manual execution via `workflow_dispatch`.
+  - Inputs: `operation` (`plan` or `apply`).
+  - Restricted to protected `main` branch under the `prd` environment.
+  - Concurrency group: `auth-platform-prd-state` (canceling in progress = false).
+  - Uses OpenTofu `1.11.5`.
+  - Authenticates via OIDC to `arn:aws:iam::209479281611:role/AuthPlatformGitHubDeployer`.
+  - In `apply` mode, generates and applies the plan within the same job. Never uploads the plan as an external artifact.
+- `.github/workflows/test-aws-oidc.yml`:
+  - Diagnostic workflow to verify OIDC STS role assumption.
 
-```text
-auth-platform-api
-```
-
-Endpoint type:
-
-```text
-Regional
-```
-
-Stage:
-
-```text
-prd
-```
-
-Do not configure authentication in API Gateway.
-
-Security is provided by Cognito OAuth2 `client_credentials`.
-
-Do not configure CORS.
-
-Use:
-
-```text
-Lambda Proxy Integration
-```
-
-Public endpoint:
-
-```text
-POST https://minha-api.freeddns.org/oauth/token
-```
-
-Do not use OpenAPI import.
-
-Create API Gateway resources directly in Terraform.
-
-Do not create business endpoints.
+*Legacy Notice*: The GitLab CI configuration is archived in `docs/archive/gitlab-ci.yml`. It is historical reference only. Do NOT restore or re-enable GitLab CI.
 
 ---
 
-# Custom Domain Requirements
+# Rules for Autonomous Agents
 
-Use the existing API Gateway custom domain:
+Autonomous agents operating in this repository MUST follow these rules without exception:
 
-```text
-minha-api.freeddns.org
-```
+1. **Scope Adherence**:
+   - Never implement business APIs, authorizers for business backends, `/hello` endpoints, or internal proxies in this repository.
+   - Any enrichment logic outside the Pre Token Generation trigger (e.g. proxying internal Kubernetes/Istio workloads) belongs to external repositories.
 
-Use base path:
+2. **Security & Zero Leakage**:
+   - Never print or commit Cognito App Client secrets or generated access tokens.
+   - Maintain the fail-closed security model in all authentication code.
+   - Never add broad IAM permissions (`*`) or grant unnecessary AWS service access.
 
-```text
-oauth
-```
+3. **Tooling & Dependency Discipline**:
+   - Always execute commands using `tofu` (OpenTofu `1.11.5`).
+   - Do NOT run `terraform init` if it alters `.terraform.lock.hcl` provider addresses away from `registry.opentofu.org`.
+   - Do NOT introduce Makefiles, Docker containers, npm packages, or external Python libraries.
 
-Terraform must create only the base path mapping.
+4. **Mandatory Pre-Completion Verification Checklist**:
+   Before submitting any code changes or completing a task, you MUST run and verify:
+   ```bash
+   # 1. Format check
+   tofu fmt -check -recursive
 
-Do not create:
+   # 2. Syntax & configuration validation
+   cd terraform
+   tofu init -backend=false -input=false -lockfile=readonly
+   tofu validate
+   cd ..
 
-- API Gateway custom domain;
-- ACM certificate;
-- DNS records;
-- certificate renewal automation.
+   # 3. Python compilation check
+   python3 -m py_compile src/wrapper/lambda_function.py src/pretoken/lambda_function.py
+   ```
 
----
-
-# Logging Requirements
-
-CloudWatch log retention:
-
-```text
-14 days
-```
-
-Create and manage CloudWatch Log Groups with Terraform.
-
-Enable API Gateway access logs.
-
-Use JSON log format similar to:
-
-```json
-{
-  "requestId": "$context.requestId",
-  "ip": "$context.identity.sourceIp",
-  "httpMethod": "$context.httpMethod",
-  "path": "$context.path",
-  "status": "$context.status",
-  "responseLength": "$context.responseLength",
-  "integrationLatency": "$context.integrationLatency"
-}
-```
-
-Do not enable API Gateway execution logs initially.
-
----
-
-# API Gateway CloudWatch Role
-
-The AWS account already has a configured API Gateway CloudWatch role:
-
-```text
-arn:aws:iam::209479281611:role/api-gateway-cloudwatch-role
-```
-
-Do not create or modify `aws_api_gateway_account`.
-
----
-
-# IAM Guidelines
-
-Follow least privilege.
-
-Avoid:
-
-```text
-Action = "*"
-Resource = "*"
-```
-
-unless strictly necessary.
-
-The Lambda Wrapper execution role should contain only CloudWatch logging
-permissions.
-
-Do not add permissions for:
-
-- Secrets Manager
-- DynamoDB
-- S3
-- Cognito Admin APIs
-
-unless explicitly requested.
-
-### Deliberate exception: Pre Token Generation trigger
-
-The Pre Token Generation Lambda (`auth-platform-lambda-pretoken`) is a
-documented exception to the "no DynamoDB" rule above. It resolves partner
-identity (`client_id -> {partner_id, tenant}`) at access-token issuance time and
-therefore needs `dynamodb:GetItem` on the `auth-partners` table.
-
-This is intentional and scoped:
-
-- the only DynamoDB action granted is `dynamodb:GetItem`;
-- the only resource is the `auth-partners` table;
-- partner identity is part of the auth domain, so it stays in this repository;
-- the trigger never reads or writes business data.
-
-The trigger fails closed: an unknown client or an invalid partner record raises,
-so Cognito does not issue a token. It never logs tokens, secrets, the
-`Authorization` header, or the contents of `auth-partners`.
-
----
-
-# README Requirements
-
-The repository README should contain:
-
-- Terraform/OpenTofu init/plan/apply commands
-- GitHub Actions overview using OpenTofu
-- GitHub OIDC role and environment requirements
-- how to retrieve Cognito client secret via AWS CLI
-- curl example for token generation
-- expected OAuth token request format
-
-Keep the README concise and operational.
+5. **Git Conventions**:
+   - Work on descriptive branches (`feature/...`, `fix/...`, `docs/...`, `chore/...`).
+   - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`).
+   - Ensure the working tree is clean after changes.
 
 ---
 
 # Explicit Non-Goals
 
-Do not implement:
-
-- business-platform resources;
-- Lambda Authorizer;
-- Cognito Authorizer for business APIs;
-- `/hello` endpoint;
-- OpenAPI import;
-- Secrets Manager for Cognito client secret;
-- DynamoDB Terraform lock table;
-- API Gateway custom domain creation;
-- ACM certificate creation;
-- DNS records;
-- Cognito custom domain;
-- multiple Cognito App Clients;
-- scope translation;
-- Terraform submodules;
-- CORS.
+Do **NOT** implement:
+- Business platform endpoints or internal microservices
+- Lambda Authorizers or Cognito Authorizers for business APIs
+- OpenAPI / Swagger imports in API Gateway
+- Secrets Manager integration for the Cognito client secret
+- DynamoDB lock table for Terraform (native S3 locking with `use_lockfile = true` is used)
+- API Gateway custom domain creation, ACM certificates, or DNS records (existing domain mapping only)
+- Cognito custom domains
+- Multiple Cognito App Clients (single M2M client only)
+- Scope translation or OAuth2 contract modifications
+- Terraform submodules
+- CORS configuration on API Gateway
 
 ---
 
-# Implementation Style
+# Operational Runbook
 
-Keep the implementation simple and readable.
+### Local Validation Commands
+```bash
+cd terraform
+tofu fmt -check
+tofu init
+tofu validate
+tofu plan
+```
 
-Prefer explicit Terraform resources over abstractions.
+### Retrieving the Cognito Client Secret
+```bash
+aws cognito-idp describe-user-pool-client \
+  --region us-east-1 \
+  --user-pool-id <user_pool_id> \
+  --client-id <app_client_id> \
+  --query 'UserPoolClient.ClientSecret' \
+  --output text
+```
 
-Avoid premature modularization.
-
-Do not introduce Docker, Makefiles, or extra tooling unless explicitly requested.
-
-The only active CI/CD is the GitHub Actions OpenTofu workflow described above.
-
-When uncertain, prefer the simplest implementation matching this document.
+### Generating an M2M Token via cURL
+```bash
+curl -X POST "https://minha-api.freeddns.org/oauth/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=<app_client_id>&client_secret=<client_secret>&scope=m2m-prd/read"
+```
